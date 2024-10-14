@@ -1,27 +1,68 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, redirect, url_for
 import sqlite3
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import (
+    JWTManager, create_access_token, jwt_required, get_jwt_identity,
+    set_access_cookies, unset_jwt_cookies
+)
 import re
+import logging
 
 app = Flask(__name__)
-CORS(app)
+
+# =======================
+# JWT Configuration
+# =======================
 app.config['JWT_SECRET_KEY'] = 'your_secret_key'  # Change this to a strong secret key
+app.config['JWT_TOKEN_LOCATION'] = ['cookies']
+app.config['JWT_ACCESS_COOKIE_PATH'] = '/'
+app.config['JWT_COOKIE_SECURE'] = False  # Set to True in production with HTTPS
+app.config['JWT_COOKIE_CSRF_PROTECT'] = False  # Set to True to enable CSRF protection
+
 jwt = JWTManager(app)
 
+# =======================
+# CORS Configuration
+# =======================
+# Replace 'http://localhost:5000' with the actual origin of your frontend application
+CORS(app, supports_credentials=True, origins=['http://localhost:5000'])
+
+# =======================
+# Logging Configuration
+# =======================
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+# =======================
+# Database Functions
+# =======================
+
 def db_connection():
-    connection = sqlite3.connect('database.db')
-    connection.row_factory = sqlite3.Row
-    return connection
+    """Establishes a connection to the SQLite database."""
+    try:
+        connection = sqlite3.connect('database.db')
+        connection.row_factory = sqlite3.Row  # Enable name-based access to columns
+        return connection
+    except sqlite3.Error as e:
+        logger.error(f"Database connection error: {e}")
+        return None
 
 def get_user(email):
+    """Retrieves a user from the database by email."""
     connection = db_connection()
-    cursor = connection.cursor()
-    cursor.execute('SELECT * FROM users WHERE email = ?', (email,))
-    user = cursor.fetchone()
-    connection.close()
-    return user
+    if not connection:
+        return None
+    try:
+        cursor = connection.cursor()
+        cursor.execute('SELECT * FROM users WHERE email = ?', (email,))
+        user = cursor.fetchone()
+        connection.close()
+        return user
+    except sqlite3.Error as e:
+        logger.error(f"Error retrieving user {email}: {e}")
+        connection.close()
+        return None
 
 def validate_password(password):
     """
@@ -45,88 +86,181 @@ def validate_password(password):
     return True, "Password is valid."
 
 def create_table():
+    """Creates the users table if it doesn't exist."""
     connection = db_connection()
-    cursor = connection.cursor()
-    cursor.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, email VARCHAR(60) UNIQUE, password VARCHAR(255))')
-    connection.commit()
-    connection.close()
+    if not connection:
+        logger.error("Failed to create users table due to database connection error.")
+        return
+    try:
+        cursor = connection.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY,
+                email VARCHAR(60) UNIQUE,
+                password VARCHAR(255)
+            )
+        ''')
+        connection.commit()
+        logger.info("Users table ensured.")
+    except sqlite3.Error as e:
+        logger.error(f"Error creating users table: {e}")
+    finally:
+        connection.close()
 
 def sanitize_table_name(email):
+    """Sanitizes the email to create a valid table name."""
     sanitized_name = re.sub(r'\W+', '_', email)
     return sanitized_name
 
 def create_table_userdata(email):
+    """Creates a user-specific table for storing parts."""
     stripped_email = sanitize_table_name(email)
     connection = db_connection()
-    cursor = connection.cursor()
-    cursor.execute(f'''CREATE TABLE IF NOT EXISTS {stripped_email}
-                       (part_number INTEGER PRIMARY KEY,
-                        part_name VARCHAR(60) NOT NULL,
-                        description VARCHAR(255) NOT NULL,
-                        oem_number VARCHAR(255) NOT NULL UNIQUE,
-                        mmc_number VARCHAR(255) NOT NULL UNIQUE,
-                        price DECIMAL(10,2) NOT NULL,
-                        quantity INTEGER NOT NULL,
-                        min_stock INTEGER NOT NULL,
-                        location VARCHAR(255) NOT NULL,
-                        manufacturer VARCHAR(255) NOT NULL,
-                        notes TEXT NOT NULL)''')
-    connection.commit()
-    connection.close()
+    if not connection:
+        logger.error(f"Failed to create user table for {email} due to database connection error.")
+        return
+    try:
+        cursor = connection.cursor()
+        cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS {stripped_email} (
+                part_number INTEGER PRIMARY KEY AUTOINCREMENT,
+                part_name VARCHAR(60) NOT NULL,
+                description VARCHAR(255) NOT NULL,
+                oem_number VARCHAR(255) NOT NULL UNIQUE,
+                mmc_number VARCHAR(255) NOT NULL UNIQUE,
+                price DECIMAL(10,2) NOT NULL,
+                quantity INTEGER NOT NULL,
+                min_stock INTEGER NOT NULL,
+                location VARCHAR(255) NOT NULL,
+                manufacturer VARCHAR(255) NOT NULL,
+                notes TEXT
+            )
+        ''')
+        connection.commit()
+        logger.info(f"User table for {email} ensured.")
+    except sqlite3.Error as e:
+        logger.error(f"Error creating user table for {email}: {e}")
+    finally:
+        connection.close()
 
-@app.route('/register', methods=['POST'])
+# =======================
+# Routes
+# =======================
+
+@app.route('/register1', methods=['POST'])
 def add_user():
+    """Registers a new user."""
     try:
         data = request.get_json()
         email = data.get('email')
         password = data.get('password')
 
+        logger.debug(f"Register attempt for email: {email}")
+
         if not email or not password:
+            logger.warning("Registration failed: Missing email or password.")
             return jsonify({'error': 'Invalid email or password provided'}), 400
 
         if get_user(email):
+            logger.warning(f"Registration failed: User {email} already exists.")
             return jsonify({'error': 'User already exists'}), 400
 
         is_valid, message = validate_password(password)
         if not is_valid:
+            logger.warning(f"Registration failed for {email}: {message}")
             return jsonify({'error': message}), 400
 
         hashed_password = generate_password_hash(password)
 
         connection = db_connection()
+        if not connection:
+            logger.error("Registration failed: Database connection error.")
+            return jsonify({'error': 'Database connection error'}), 500
+
         cursor = connection.cursor()
         cursor.execute('INSERT INTO users (email, password) VALUES (?, ?)', (email, hashed_password))
         connection.commit()
         connection.close()
+
         create_table_userdata(email)
+        access_token = create_access_token(identity=email)
 
-        return jsonify({'message': 'User registered successfully!'}), 201
+        # Set JWT token in cookie
+        resp = jsonify({'message': 'User registered successfully!'})
+        set_access_cookies(resp, access_token)
 
+        logger.info(f"User {email} registered successfully.")
+        return resp, 201
+
+    except sqlite3.IntegrityError as ie:
+        logger.error(f"IntegrityError during registration for {email}: {ie}")
+        return jsonify({'error': 'Email already exists.'}), 400
     except Exception as e:
-        return jsonify({'error': 'Something went wrong'}), 500
+        logger.error(f"Unexpected error during registration for {email}: {e}")
+        return jsonify({'error': 'Something went wrong', 'details': str(e)}), 500
 
 @app.route('/login', methods=['POST'])
 def login():
+    """Logs in an existing user."""
     try:
         data = request.get_json()
         email = data.get('email')
         password = data.get('password')
 
+        logger.debug(f"Login attempt for email: {email}")
+
         user = get_user(email)
-        if not user or not check_password_hash(user['password'], password):
+        if not user:
+            logger.warning(f"Login failed: User {email} does not exist.")
+            return jsonify({'error': 'Invalid credentials'}), 401
+
+        if not check_password_hash(user['password'], password):
+            logger.warning(f"Login failed: Incorrect password for {email}.")
             return jsonify({'error': 'Invalid credentials'}), 401
 
         access_token = create_access_token(identity=email)
-        return jsonify({'access_token': access_token}), 200
+        # Set JWT token in cookie
+        resp = jsonify({'message': 'Login successful!'})
+        set_access_cookies(resp, access_token)
+
+        logger.info(f"User {email} logged in successfully.")
+        return resp, 200
 
     except Exception as e:
-        return jsonify({'error': 'Something went wrong'}), 500
+        logger.error(f"Unexpected error during login for {email}: {e}")
+        return jsonify({'error': 'Something went wrong', 'details': str(e)}), 500
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    """Logs out the current user by unsetting the JWT cookies."""
+    try:
+        resp = jsonify({'message': 'Logout successful!'})
+        unset_jwt_cookies(resp)
+        logger.info("User logged out successfully.")
+        return resp, 200
+    except Exception as e:
+        logger.error(f"Unexpected error during logout: {e}")
+        return jsonify({'error': 'Something went wrong', 'details': str(e)}), 500
+
+@app.route('/get_current_user', methods=['GET'])
+@jwt_required()
+def get_current_user():
+    """Returns the current logged-in user's email."""
+    try:
+        current_user = get_jwt_identity()  # Get the logged-in user's email from the token
+        logger.debug(f"Current user fetched: {current_user}")
+        return jsonify({'email': current_user}), 200
+    except Exception as e:
+        logger.error(f"Unexpected error fetching current user: {e}")
+        return jsonify({'error': 'Something went wrong', 'details': str(e)}), 500
 
 @app.route('/add_part', methods=['POST'])
 @jwt_required()
 def add_part():
+    """Adds a new part to the user's inventory."""
     try:
         current_user = get_jwt_identity()  # Get the logged-in user's email from the token
+        logger.debug(f"Add part attempt by user: {current_user}")
 
         data = request.get_json()
         part_name = data.get('part_name')
@@ -138,106 +272,246 @@ def add_part():
         min_stock = data.get('min_stock')
         location = data.get('location')
         manufacturer = data.get('manufacturer')
-        notes = data.get('notes')
+        notes = data.get('notes', '')  # Notes can be optional
 
-        if not all([part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer, notes]):
+        # Validate required fields
+        if not all([part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer]):
+            logger.warning(f"Add part failed: Missing required fields by user {current_user}.")
             return jsonify({'error': 'Invalid part data provided'}), 400
 
+        # Sanitize table name
         stripped_email = sanitize_table_name(current_user)
 
         connection = db_connection()
+        if not connection:
+            logger.error("Add part failed: Database connection error.")
+            return jsonify({'error': 'Database connection error'}), 500
+
         cursor = connection.cursor()
-        cursor.execute(f'''INSERT INTO {stripped_email} 
-                           (part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer, notes) 
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                       (part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer, notes))
+        cursor.execute(f'''
+            INSERT INTO {stripped_email} 
+            (part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer, notes) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer, notes))
         connection.commit()
+        part_number = cursor.lastrowid
         connection.close()
 
-        return jsonify({'message': 'Part added successfully!'}), 201
+        logger.info(f"Part '{part_name}' added successfully by user {current_user} with part_number {part_number}.")
+        return jsonify({'message': 'Part added successfully!', 'part_number': part_number}), 201
 
+    except sqlite3.IntegrityError as ie:
+        logger.error(f"IntegrityError adding part by user {current_user}: {ie}")
+        return jsonify({'error': 'OEM Number or MMC Number already exists.'}), 400
     except Exception as e:
+        logger.error(f"Unexpected error adding part by user {current_user}: {e}")
         return jsonify({'error': 'Something went wrong', 'details': str(e)}), 500
-    
+
 @app.route('/delete_part', methods=['DELETE'])
 @jwt_required()
 def delete_part():
+    """Deletes a part from the user's inventory."""
     try:
         current_user = get_jwt_identity()  # Get the logged-in user's email from the token
+        logger.debug(f"Delete part attempt by user: {current_user}")
 
         data = request.get_json()
-        partnumber = data.get("part_number")
+        part_number = data.get("part_number")
 
-        if not partnumber:
+        if not part_number:
+            logger.warning(f"Delete part failed: Missing part_number by user {current_user}.")
             return jsonify({'error': 'Invalid part number provided'}), 400
-        
+
         stripped_email = sanitize_table_name(current_user)
 
         connection = db_connection()
+        if not connection:
+            logger.error("Delete part failed: Database connection error.")
+            return jsonify({'error': 'Database connection error'}), 500
+
         cursor = connection.cursor()
 
-        if partnumber:
-            cursor.execute(f'SELECT * FROM {stripped_email} WHERE part_number = ?', (partnumber,))
-            part = cursor.fetchone()
-            if not part:
-                return jsonify({'error': 'Part not found'}), 404
+        cursor.execute(f'SELECT * FROM {stripped_email} WHERE part_number = ?', (part_number,))
+        part = cursor.fetchone()
+        if not part:
+            logger.warning(f"Delete part failed: Part number {part_number} not found for user {current_user}.")
+            connection.close()
+            return jsonify({'error': 'Part not found'}), 404
 
-        if partnumber:
-            cursor.execute(f'DELETE FROM {stripped_email} WHERE part_number = ?', (partnumber,))
-
+        cursor.execute(f'DELETE FROM {stripped_email} WHERE part_number = ?', (part_number,))
         connection.commit()
         connection.close()
 
+        logger.info(f"Part number {part_number} deleted successfully by user {current_user}.")
         return jsonify({'message': 'Part deleted successfully!'}), 200
-    
+
     except Exception as e:
+        logger.error(f"Unexpected error deleting part by user {current_user}: {e}")
         return jsonify({'error': 'Something went wrong', 'details': str(e)}), 500
-    
-@app.route('/update_part', methods=['PUT'])
+
+@app.route('/edit_part', methods=['GET', 'PUT'])
 @jwt_required()
-def update_part():
+def edit_part():
+    """Handles both rendering the edit page and updating the part."""
+    try:
+        current_user = get_jwt_identity()
+        logger.debug(f"Edit part request by user: {current_user}")
+
+        stripped_email = sanitize_table_name(current_user)
+        connection = db_connection()
+        if not connection:
+            logger.error("Edit part failed: Database connection error.")
+            return jsonify({'error': 'Database connection error'}), 500
+
+        cursor = connection.cursor()
+
+        if request.method == 'GET':
+            # Handle GET request: Render the edit form with pre-filled data
+            part_number = request.args.get('part_number')
+            if not part_number:
+                logger.warning(f"Edit part failed: Missing part_number by user {current_user}.")
+                connection.close()
+                return jsonify({'error': 'Missing part number'}), 400
+
+            try:
+                cursor.execute(f'SELECT * FROM {stripped_email} WHERE part_number = ?', (part_number,))
+                part = cursor.fetchone()
+                connection.close()
+
+                if not part:
+                    logger.warning(f"Edit part failed: Part number {part_number} not found for user {current_user}.")
+                    return jsonify({'error': 'Part not found'}), 404
+
+                # Render the edit_part.html template with the part details and current user
+                logger.info(f"Rendering edit_part.html for part_number {part_number} by user {current_user}.")
+                return render_template('edit_part.html', part=dict(part), current_user=current_user)
+
+            except sqlite3.Error as e:
+                logger.error(f"Database error fetching part {part_number} for user {current_user}: {e}")
+                connection.close()
+                return jsonify({'error': 'Database query error'}), 500
+
+        elif request.method == 'PUT':
+            # Handle PUT request: Update the part in the database
+            data = request.get_json()
+            part_number = data.get("part_number")
+            part_name = data.get('part_name')
+            description = data.get('description')
+            oem_number = data.get('oem_number')
+            mmc_number = data.get('mmc_number')
+            price = data.get('price')
+            quantity = data.get('quantity')
+            min_stock = data.get('min_stock')
+            location = data.get('location')
+            manufacturer = data.get('manufacturer')
+            notes = data.get('notes', '')  # Notes are optional
+
+            # Validate required fields
+            if not all([part_number, part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer]):
+                logger.warning(f"Update part failed: Missing required fields by user {current_user}.")
+                connection.close()
+                return jsonify({'error': 'Missing required fields'}), 400
+
+            try:
+                # Check if the part exists
+                cursor.execute(f'SELECT * FROM {stripped_email} WHERE part_number = ?', (part_number,))
+                part = cursor.fetchone()
+                if not part:
+                    logger.warning(f"Update part failed: Part number {part_number} not found for user {current_user}.")
+                    connection.close()
+                    return jsonify({'error': 'Part not found'}), 404
+
+                # Update the part details
+                cursor.execute(f'''
+                    UPDATE {stripped_email}
+                    SET part_name = ?, description = ?, oem_number = ?, mmc_number = ?, price = ?, 
+                        quantity = ?, min_stock = ?, location = ?, manufacturer = ?, notes = ?
+                    WHERE part_number = ?
+                ''', (part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer, notes, part_number))
+                connection.commit()
+                connection.close()
+
+                logger.info(f"Part number {part_number} updated successfully by user {current_user}.")
+                return jsonify({'message': 'Part updated successfully!'}), 200
+
+            except sqlite3.IntegrityError as ie:
+                logger.error(f"IntegrityError updating part by user {current_user}: {ie}")
+                connection.close()
+                return jsonify({'error': 'OEM Number or MMC Number already exists.'}), 400
+            except sqlite3.Error as e:
+                logger.error(f"Database error updating part {part_number} for user {current_user}: {e}")
+                connection.close()
+                return jsonify({'error': 'Database update error'}), 500
+
+    except Exception as e:
+        logger.error(f"Unexpected error in edit_part: {e}")
+        return jsonify({'error': 'Something went wrong', 'details': str(e)}), 500
+
+@app.route('/get_parts', methods=['GET'])
+@jwt_required()
+def get_parts():
+    """Retrieves all parts for the logged-in user."""
     try:
         current_user = get_jwt_identity()  # Get the logged-in user's email from the token
-
-        data = request.get_json()
-        partnumber = data.get("part_number")
-        part_name = data.get('part_name')
-        description = data.get('description')
-        oem_number = data.get('oem_number')
-        mmc_number = data.get('mmc_number')
-        price = data.get('price')
-        quantity = data.get('quantity')
-        min_stock = data.get('min_stock')
-        location = data.get('location')
-        manufacturer = data.get('manufacturer')
-        notes = data.get('notes')
-
-        if not all([partnumber, part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer, notes]):
-            return jsonify({'error': 'Invalid part data provided'}), 400
+        logger.debug(f"Get parts request by user: {current_user}")
 
         stripped_email = sanitize_table_name(current_user)
 
         connection = db_connection()
+        if not connection:
+            logger.error("Get parts failed: Database connection error.")
+            return jsonify({'error': 'Database connection error'}), 500
+
         cursor = connection.cursor()
-        cursor.execute(f'''UPDATE {stripped_email} 
-                           SET part_name = ?, description = ?, oem_number = ?, mmc_number = ?, price = ?, quantity = ?, min_stock = ?, location = ?, manufacturer = ?, notes = ? 
-                           WHERE part_number = ?''',
-                       (part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer, notes, partnumber))
-        connection.commit()
+        cursor.execute(f'SELECT * FROM {stripped_email}')
+        parts = cursor.fetchall()
         connection.close()
 
-        return jsonify({'message': 'Part updated successfully!'}), 200
-
+        logger.info(f"Retrieved {len(parts)} parts for user {current_user}.")
+        return jsonify({'parts': [dict(part) for part in parts]})
+    
     except Exception as e:
+        logger.error(f"Unexpected error retrieving parts for user {current_user}: {e}")
         return jsonify({'error': 'Something went wrong', 'details': str(e)}), 500
 
 @app.route('/')
 def index():
+    """Renders the login page."""
     return render_template('index.html')
 
 @app.route('/register')
 def register():
+    """Renders the registration page."""
     return render_template('register.html')
+
+@app.route('/dashboard')
+@jwt_required()
+def dashboard():
+    """Renders the dashboard page."""
+    current_user = get_jwt_identity()
+    stripped_email = sanitize_table_name(current_user)
+    
+    connection = db_connection()
+    if not connection:
+        logger.error("Dashboard access failed: Database connection error.")
+        return jsonify({'error': 'Database connection error'}), 500
+
+    cursor = connection.cursor()
+    try:
+        cursor.execute(f'SELECT * FROM {stripped_email}')
+        parts = cursor.fetchall()
+        connection.close()
+        return render_template('dashboard.html', parts=[dict(part) for part in parts], current_user=current_user)
+    except sqlite3.Error as e:
+        logger.error(f"Database error fetching parts for dashboard: {e}")
+        connection.close()
+        return jsonify({'error': 'Database query error'}), 500
+
+@app.route('/create_part')
+@jwt_required()
+def create_part():
+    """Renders the create part page."""
+    return render_template('create_part.html', current_user=get_jwt_identity())
 
 if __name__ == '__main__':
     create_table()

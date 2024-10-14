@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Edit Part - Inventory Management System</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+      .container-fullscreen {
+        max-width: 95%;
+      }
+      .btn-sm-custom {
+        padding: 0.375rem 0.75rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1 class="text-center mb-4">Edit Part</h1>
+
+    <div class="container-fullscreen mx-auto">
+      <!-- User info and logout button -->
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+          <h5>Welcome, <span id="loggedInUser">{{ current_user }}</span></h5> <!-- Display logged-in user -->
+        </div>
+        <div>
+          <button class="btn btn-danger btn-sm-custom" onclick="logout()">Logout</button>
+        </div>
+      </div>
+
+      <!-- Form for editing part -->
+      <div class="bg-light shadow-lg border border-primary rounded-5 p-4 mb-4">
+        <h2 class="text-center mb-4">Edit Part Information</h2>
+        
+        <form id="editPartForm">
+          <!-- Hidden field to store part_number -->
+          <input type="hidden" id="part_number" name="part_number" value="{{ part['part_number'] }}">
+
+          <div class="mb-3">
+            <label for="partName" class="form-label">Part Name</label>
+            <input type="text" class="form-control" id="partName" name="part_name" value="{{ part['part_name'] }}" required>
+          </div>
+          <div class="mb-3">
+            <label for="description" class="form-label">Description</label>
+            <input type="text" class="form-control" id="description" name="description" value="{{ part['description'] }}">
+          </div>
+          <div class="mb-3">
+            <label for="oemNumber" class="form-label">OEM Number</label>
+            <input type="text" class="form-control" id="oemNumber" name="oem_number" value="{{ part['oem_number'] }}">
+          </div>
+          <div class="mb-3">
+            <label for="mmcNumber" class="form-label">MMC Number</label>
+            <input type="text" class="form-control" id="mmcNumber" name="mmc_number" value="{{ part['mmc_number'] }}">
+          </div>
+          <div class="mb-3">
+            <label for="price" class="form-label">Price</label>
+            <input type="number" step="0.01" class="form-control" id="price" name="price" value="{{ part['price'] }}" required>
+          </div>
+          <div class="mb-3">
+            <label for="quantity" class="form-label">Quantity</label>
+            <input type="number" class="form-control" id="quantity" name="quantity" value="{{ part['quantity'] }}" required>
+          </div>
+          <div class="mb-3">
+            <label for="minStock" class="form-label">Min Stock</label>
+            <input type="number" class="form-control" id="minStock" name="min_stock" value="{{ part['min_stock'] }}">
+          </div>
+          <div class="mb-3">
+            <label for="location" class="form-label">Location</label>
+            <input type="text" class="form-control" id="location" name="location" value="{{ part['location'] }}">
+          </div>
+          <div class="mb-3">
+            <label for="manufacturer" class="form-label">Manufacturer</label>
+            <input type="text" class="form-control" id="manufacturer" name="manufacturer" value="{{ part['manufacturer'] }}">
+          </div>
+          <div class="mb-3">
+            <label for="notes" class="form-label">Notes</label>
+            <textarea class="form-control" id="notes" name="notes">{{ part['notes'] }}</textarea>
+          </div>
+          <button type="submit" class="btn btn-primary">Save Changes</button>
+          <a href="/dashboard" class="btn btn-secondary">Cancel</a>
+        </form>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+      // Function to handle form submission and send updated data to the server
+      document.getElementById('editPartForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+
+        // Gather updated data from the form
+        const updatedData = {
+          part_number: document.getElementById('part_number').value,  // Part ID from hidden input
+          part_name: document.getElementById('partName').value,
+          description: document.getElementById('description').value,
+          oem_number: document.getElementById('oemNumber').value,
+          mmc_number: document.getElementById('mmcNumber').value,
+          price: parseFloat(document.getElementById('price').value),
+          quantity: parseInt(document.getElementById('quantity').value),
+          min_stock: parseInt(document.getElementById('minStock').value),
+          location: document.getElementById('location').value,
+          manufacturer: document.getElementById('manufacturer').value,
+          notes: document.getElementById('notes').value  // Optional field
+        };
+
+        // Call the edit_part API to save changes
+        fetch(`/edit_part`, {  // Ensure this matches the Flask route
+          method: 'PUT',
+          credentials: 'include',  // Include cookies in the request
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(updatedData)  // Send the updated part data as JSON
+        })
+        .then(response => {
+          const contentType = response.headers.get('Content-Type');
+          if (contentType && contentType.includes('application/json')) {
+            return response.json();
+          } else {
+            // Attempt to parse as text for better error messages
+            return response.text().then(text => { throw new Error(text) });
+          }
+        })
+        .then(data => {
+          if (data.message) {
+            alert(data.message);
+            // Redirect back to the dashboard or parts list
+            window.location.href = '/dashboard';
+          }
+        })
+        .catch(error => {
+          console.error('Error updating part:', error);
+          alert('Error updating part: ' + error.message);
+        });
+      });
+
+      // Logout function to remove token and redirect to login
+      function logout() {
+        fetch('/logout', {
+          method: 'POST',
+          credentials: 'include'  // Include cookies in the request
+        })
+        .then(response => {
+          if (response.ok) {
+            window.location.href = '/';
+          } else {
+            alert('Logout failed.');
+          }
+        })
+        .catch(error => {
+          console.error('Error:', error);
+        });
+      }
+    </script>
+  </body>
+</html>
