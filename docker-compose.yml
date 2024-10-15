@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "5002:5000"
+    environment:
+      - MYSQL_HOST=db
+      - MYSQL_DATABASE=inventory_db
+      - MYSQL_USER=admin
+      - MYSQL_PASSWORD=1245
+    depends_on:
+      - db
+    networks:
+      - app-network
+
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: 1245
+      MYSQL_DATABASE: inventory_db
+      MYSQL_USER: admin
+      MYSQL_PASSWORD: 1245
+    ports:
+      - "3306:3306"
+    networks:
+      - app-network
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+networks:
+  app-network:
+
+volumes:
+  mysql_data:

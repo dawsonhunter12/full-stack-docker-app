@@ -1,5 +1,5 @@
+import mysql.connector
 from flask import Flask, request, jsonify, render_template, redirect, url_for
-import sqlite3
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import (
@@ -14,18 +14,17 @@ app = Flask(__name__)
 # =======================
 # JWT Configuration
 # =======================
-app.config['JWT_SECRET_KEY'] = 'your_secret_key'  # Change this to a strong secret key
+app.config['JWT_SECRET_KEY'] = 'Jettson1245!'  # Change this to a strong secret key
 app.config['JWT_TOKEN_LOCATION'] = ['cookies']
 app.config['JWT_ACCESS_COOKIE_PATH'] = '/'
-app.config['JWT_COOKIE_SECURE'] = False  # Set to True in production with HTTPS
-app.config['JWT_COOKIE_CSRF_PROTECT'] = False  # Set to True to enable CSRF protection
+app.config['JWT_COOKIE_SECURE'] = True  # Set to True in production with HTTPS
+app.config['JWT_COOKIE_CSRF_PROTECT'] = True  # Set to True to enable CSRF protection
 
 jwt = JWTManager(app)
 
 # =======================
 # CORS Configuration
 # =======================
-# Replace 'http://localhost:5000' with the actual origin of your frontend application
 CORS(app, supports_credentials=True, origins=['http://localhost:5000'])
 
 # =======================
@@ -39,12 +38,16 @@ logger = logging.getLogger(__name__)
 # =======================
 
 def db_connection():
-    """Establishes a connection to the SQLite database."""
+    """Establishes a connection to the MySQL database."""
     try:
-        connection = sqlite3.connect('database.db')
-        connection.row_factory = sqlite3.Row  # Enable name-based access to columns
+        connection = mysql.connector.connect(
+            host="db",             # MySQL service name in docker-compose.yml
+            user="admin",       # MySQL username
+            password="1245",  # MySQL password
+            database="inventory_db"   # MySQL database name
+        )
         return connection
-    except sqlite3.Error as e:
+    except mysql.connector.Error as e:
         logger.error(f"Database connection error: {e}")
         return None
 
@@ -54,25 +57,18 @@ def get_user(email):
     if not connection:
         return None
     try:
-        cursor = connection.cursor()
-        cursor.execute('SELECT * FROM users WHERE email = ?', (email,))
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute('SELECT * FROM users WHERE email = %s', (email,))
         user = cursor.fetchone()
         connection.close()
         return user
-    except sqlite3.Error as e:
+    except mysql.connector.Error as e:
         logger.error(f"Error retrieving user {email}: {e}")
         connection.close()
         return None
 
 def validate_password(password):
-    """
-    Validates the password based on the following criteria:
-    - At least 8 characters long
-    - Contains at least one lowercase letter
-    - Contains at least one uppercase letter
-    - Contains at least one digit
-    - Contains at least one special character (!@#$%^&*()-_+=<>?)
-    """
+    """Validates the password based on security criteria."""
     if len(password) < 8:
         return False, "Password must be at least 8 characters long."
     if not re.search(r'[A-Z]', password):
@@ -85,7 +81,7 @@ def validate_password(password):
         return False, "Password must contain at least one special character."
     return True, "Password is valid."
 
-def create_table():
+def create_users_table():
     """Creates the users table if it doesn't exist."""
     connection = db_connection()
     if not connection:
@@ -95,14 +91,14 @@ def create_table():
         cursor = connection.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY,
+                id INT AUTO_INCREMENT PRIMARY KEY,
                 email VARCHAR(60) UNIQUE,
                 password VARCHAR(255)
             )
         ''')
         connection.commit()
         logger.info("Users table ensured.")
-    except sqlite3.Error as e:
+    except mysql.connector.Error as e:
         logger.error(f"Error creating users table: {e}")
     finally:
         connection.close()
@@ -114,7 +110,7 @@ def sanitize_table_name(email):
 
 def create_table_userdata(email):
     """Creates a user-specific table for storing parts."""
-    stripped_email = sanitize_table_name(email)
+    sanitized_email = sanitize_table_name(email)
     connection = db_connection()
     if not connection:
         logger.error(f"Failed to create user table for {email} due to database connection error.")
@@ -122,15 +118,15 @@ def create_table_userdata(email):
     try:
         cursor = connection.cursor()
         cursor.execute(f'''
-            CREATE TABLE IF NOT EXISTS {stripped_email} (
-                part_number INTEGER PRIMARY KEY AUTOINCREMENT,
+            CREATE TABLE IF NOT EXISTS {sanitized_email} (
+                part_number INT AUTO_INCREMENT PRIMARY KEY,
                 part_name VARCHAR(60) NOT NULL,
                 description VARCHAR(255) NOT NULL,
                 oem_number VARCHAR(255) NOT NULL UNIQUE,
                 mmc_number VARCHAR(255) NOT NULL UNIQUE,
                 price DECIMAL(10,2) NOT NULL,
-                quantity INTEGER NOT NULL,
-                min_stock INTEGER NOT NULL,
+                quantity INT NOT NULL,
+                min_stock INT NOT NULL,
                 location VARCHAR(255) NOT NULL,
                 manufacturer VARCHAR(255) NOT NULL,
                 notes TEXT
@@ -138,7 +134,7 @@ def create_table_userdata(email):
         ''')
         connection.commit()
         logger.info(f"User table for {email} ensured.")
-    except sqlite3.Error as e:
+    except mysql.connector.Error as e:
         logger.error(f"Error creating user table for {email}: {e}")
     finally:
         connection.close()
@@ -178,7 +174,7 @@ def add_user():
             return jsonify({'error': 'Database connection error'}), 500
 
         cursor = connection.cursor()
-        cursor.execute('INSERT INTO users (email, password) VALUES (?, ?)', (email, hashed_password))
+        cursor.execute('INSERT INTO users (email, password) VALUES (%s, %s)', (email, hashed_password))
         connection.commit()
         connection.close()
 
@@ -192,7 +188,7 @@ def add_user():
         logger.info(f"User {email} registered successfully.")
         return resp, 201
 
-    except sqlite3.IntegrityError as ie:
+    except mysql.connector.IntegrityError as ie:
         logger.error(f"IntegrityError during registration for {email}: {ie}")
         return jsonify({'error': 'Email already exists.'}), 400
     except Exception as e:
@@ -274,13 +270,11 @@ def add_part():
         manufacturer = data.get('manufacturer')
         notes = data.get('notes', '')  # Notes can be optional
 
-        # Validate required fields
         if not all([part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer]):
             logger.warning(f"Add part failed: Missing required fields by user {current_user}.")
             return jsonify({'error': 'Invalid part data provided'}), 400
 
-        # Sanitize table name
-        stripped_email = sanitize_table_name(current_user)
+        sanitized_email = sanitize_table_name(current_user)
 
         connection = db_connection()
         if not connection:
@@ -289,9 +283,9 @@ def add_part():
 
         cursor = connection.cursor()
         cursor.execute(f'''
-            INSERT INTO {stripped_email} 
+            INSERT INTO {sanitized_email} 
             (part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer, notes) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ''', (part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer, notes))
         connection.commit()
         part_number = cursor.lastrowid
@@ -300,7 +294,7 @@ def add_part():
         logger.info(f"Part '{part_name}' added successfully by user {current_user} with part_number {part_number}.")
         return jsonify({'message': 'Part added successfully!', 'part_number': part_number}), 201
 
-    except sqlite3.IntegrityError as ie:
+    except mysql.connector.IntegrityError as ie:
         logger.error(f"IntegrityError adding part by user {current_user}: {ie}")
         return jsonify({'error': 'OEM Number or MMC Number already exists.'}), 400
     except Exception as e:
@@ -322,7 +316,7 @@ def delete_part():
             logger.warning(f"Delete part failed: Missing part_number by user {current_user}.")
             return jsonify({'error': 'Invalid part number provided'}), 400
 
-        stripped_email = sanitize_table_name(current_user)
+        sanitized_email = sanitize_table_name(current_user)
 
         connection = db_connection()
         if not connection:
@@ -331,14 +325,14 @@ def delete_part():
 
         cursor = connection.cursor()
 
-        cursor.execute(f'SELECT * FROM {stripped_email} WHERE part_number = ?', (part_number,))
+        cursor.execute(f'SELECT * FROM {sanitized_email} WHERE part_number = %s', (part_number,))
         part = cursor.fetchone()
         if not part:
             logger.warning(f"Delete part failed: Part number {part_number} not found for user {current_user}.")
             connection.close()
             return jsonify({'error': 'Part not found'}), 404
 
-        cursor.execute(f'DELETE FROM {stripped_email} WHERE part_number = ?', (part_number,))
+        cursor.execute(f'DELETE FROM {sanitized_email} WHERE part_number = %s', (part_number,))
         connection.commit()
         connection.close()
 
@@ -357,7 +351,7 @@ def edit_part():
         current_user = get_jwt_identity()
         logger.debug(f"Edit part request by user: {current_user}")
 
-        stripped_email = sanitize_table_name(current_user)
+        sanitized_email = sanitize_table_name(current_user)
         connection = db_connection()
         if not connection:
             logger.error("Edit part failed: Database connection error.")
@@ -366,7 +360,6 @@ def edit_part():
         cursor = connection.cursor()
 
         if request.method == 'GET':
-            # Handle GET request: Render the edit form with pre-filled data
             part_number = request.args.get('part_number')
             if not part_number:
                 logger.warning(f"Edit part failed: Missing part_number by user {current_user}.")
@@ -374,7 +367,7 @@ def edit_part():
                 return jsonify({'error': 'Missing part number'}), 400
 
             try:
-                cursor.execute(f'SELECT * FROM {stripped_email} WHERE part_number = ?', (part_number,))
+                cursor.execute(f'SELECT * FROM {sanitized_email} WHERE part_number = %s', (part_number,))
                 part = cursor.fetchone()
                 connection.close()
 
@@ -382,17 +375,15 @@ def edit_part():
                     logger.warning(f"Edit part failed: Part number {part_number} not found for user {current_user}.")
                     return jsonify({'error': 'Part not found'}), 404
 
-                # Render the edit_part.html template with the part details and current user
                 logger.info(f"Rendering edit_part.html for part_number {part_number} by user {current_user}.")
                 return render_template('edit_part.html', part=dict(part), current_user=current_user)
 
-            except sqlite3.Error as e:
+            except mysql.connector.Error as e:
                 logger.error(f"Database error fetching part {part_number} for user {current_user}: {e}")
                 connection.close()
                 return jsonify({'error': 'Database query error'}), 500
 
         elif request.method == 'PUT':
-            # Handle PUT request: Update the part in the database
             data = request.get_json()
             part_number = data.get("part_number")
             part_name = data.get('part_name')
@@ -406,27 +397,24 @@ def edit_part():
             manufacturer = data.get('manufacturer')
             notes = data.get('notes', '')  # Notes are optional
 
-            # Validate required fields
             if not all([part_number, part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer]):
                 logger.warning(f"Update part failed: Missing required fields by user {current_user}.")
                 connection.close()
                 return jsonify({'error': 'Missing required fields'}), 400
 
             try:
-                # Check if the part exists
-                cursor.execute(f'SELECT * FROM {stripped_email} WHERE part_number = ?', (part_number,))
+                cursor.execute(f'SELECT * FROM {sanitized_email} WHERE part_number = %s', (part_number,))
                 part = cursor.fetchone()
                 if not part:
                     logger.warning(f"Update part failed: Part number {part_number} not found for user {current_user}.")
                     connection.close()
                     return jsonify({'error': 'Part not found'}), 404
 
-                # Update the part details
                 cursor.execute(f'''
-                    UPDATE {stripped_email}
-                    SET part_name = ?, description = ?, oem_number = ?, mmc_number = ?, price = ?, 
-                        quantity = ?, min_stock = ?, location = ?, manufacturer = ?, notes = ?
-                    WHERE part_number = ?
+                    UPDATE {sanitized_email}
+                    SET part_name = %s, description = %s, oem_number = %s, mmc_number = %s, price = %s, 
+                        quantity = %s, min_stock = %s, location = %s, manufacturer = %s, notes = %s
+                    WHERE part_number = %s
                 ''', (part_name, description, oem_number, mmc_number, price, quantity, min_stock, location, manufacturer, notes, part_number))
                 connection.commit()
                 connection.close()
@@ -434,11 +422,11 @@ def edit_part():
                 logger.info(f"Part number {part_number} updated successfully by user {current_user}.")
                 return jsonify({'message': 'Part updated successfully!'}), 200
 
-            except sqlite3.IntegrityError as ie:
+            except mysql.connector.IntegrityError as ie:
                 logger.error(f"IntegrityError updating part by user {current_user}: {ie}")
                 connection.close()
                 return jsonify({'error': 'OEM Number or MMC Number already exists.'}), 400
-            except sqlite3.Error as e:
+            except mysql.connector.Error as e:
                 logger.error(f"Database error updating part {part_number} for user {current_user}: {e}")
                 connection.close()
                 return jsonify({'error': 'Database update error'}), 500
@@ -455,7 +443,7 @@ def get_parts():
         current_user = get_jwt_identity()  # Get the logged-in user's email from the token
         logger.debug(f"Get parts request by user: {current_user}")
 
-        stripped_email = sanitize_table_name(current_user)
+        sanitized_email = sanitize_table_name(current_user)
 
         connection = db_connection()
         if not connection:
@@ -463,7 +451,7 @@ def get_parts():
             return jsonify({'error': 'Database connection error'}), 500
 
         cursor = connection.cursor()
-        cursor.execute(f'SELECT * FROM {stripped_email}')
+        cursor.execute(f'SELECT * FROM {sanitized_email}')
         parts = cursor.fetchall()
         connection.close()
 
@@ -489,7 +477,7 @@ def register():
 def dashboard():
     """Renders the dashboard page."""
     current_user = get_jwt_identity()
-    stripped_email = sanitize_table_name(current_user)
+    sanitized_email = sanitize_table_name(current_user)
     
     connection = db_connection()
     if not connection:
@@ -498,11 +486,11 @@ def dashboard():
 
     cursor = connection.cursor()
     try:
-        cursor.execute(f'SELECT * FROM {stripped_email}')
+        cursor.execute(f'SELECT * FROM {sanitized_email}')
         parts = cursor.fetchall()
         connection.close()
         return render_template('dashboard.html', parts=[dict(part) for part in parts], current_user=current_user)
-    except sqlite3.Error as e:
+    except mysql.connector.Error as e:
         logger.error(f"Database error fetching parts for dashboard: {e}")
         connection.close()
         return jsonify({'error': 'Database query error'}), 500
@@ -514,5 +502,5 @@ def create_part():
     return render_template('create_part.html', current_user=get_jwt_identity())
 
 if __name__ == '__main__':
-    create_table()
-    app.run(debug=True)
+    create_users_table()
+    app.run(host="0.0.0.0", port=5000, debug=False)
